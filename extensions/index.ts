@@ -8,12 +8,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export interface ProjectItem {
+interface ProjectItem {
 	name: string;
 	path: string;
 }
 
-export interface ProjectsConfig {
+interface ProjectsConfig {
 	noProjectDir: string;
 	projects: ProjectItem[];
 }
@@ -445,6 +445,92 @@ async function handleRemoveProject(
 	return false;
 }
 
+async function handleMigrateCurrentSession(
+	ctx: ExtensionCommandContext,
+	config: ProjectsConfig,
+): Promise<boolean> {
+	const currentCwd = normalizeDir(ctx.cwd);
+	const curFile = ctx.sessionManager.getSessionFile();
+	if (!curFile || !fs.existsSync(curFile)) {
+		ctx.ui.notify("当前没有可迁移的会话文件", "warning");
+		return false;
+	}
+
+	const targets: { name: string; path: string }[] = [];
+
+	const noProjNorm = normalizeDir(config.noProjectDir);
+	if (currentCwd !== noProjNorm) {
+		targets.push({ name: "💬 无项目对话", path: config.noProjectDir });
+	}
+
+	for (const p of config.projects) {
+		if (normalizeDir(p.path) !== currentCwd) {
+			targets.push({ name: `📁 ${p.name}`, path: p.path });
+		}
+	}
+
+	if (targets.length === 0) {
+		ctx.ui.notify("没有其他可迁移的目标项目", "info");
+		return false;
+	}
+
+	const choices = targets.map(
+		(t, idx) => `${idx + 1}. ${t.name} (${displayPath(t.path)})`,
+	);
+	choices.push("↩️ 取消");
+
+	const pick = await ctx.ui.select("选择要将当前会话迁移到的目标项目:", choices);
+	if (!pick || pick.startsWith("↩️")) return false;
+
+	const idx = Number.parseInt(pick.split(".")[0], 10) - 1;
+	const selected = targets[idx];
+	if (!selected) return false;
+
+	const ok = await ctx.ui.confirm(
+		"确认迁移会话",
+		`确定要将当前整个对话记录迁移到 "${selected.name}" 并切换到该项目吗？`,
+	);
+	if (!ok) return false;
+
+	const targetResolvedCwd = normalizeDir(selected.path);
+	if (!fs.existsSync(targetResolvedCwd)) {
+		fs.mkdirSync(targetResolvedCwd, { recursive: true });
+	}
+
+	const smTarget = SessionManager.create(targetResolvedCwd);
+	const targetSessionDir = smTarget.getSessionDir();
+	fs.mkdirSync(targetSessionDir, { recursive: true });
+
+	const targetSessionFile = path.join(targetSessionDir, path.basename(curFile));
+
+	const content = fs.readFileSync(curFile, "utf-8");
+	const lines = content.split("\n");
+	if (lines.length > 0 && lines[0].trim()) {
+		try {
+			const header = JSON.parse(lines[0]);
+			header.cwd = targetResolvedCwd;
+			lines[0] = JSON.stringify(header);
+		} catch {
+			// ignore
+		}
+	}
+	fs.writeFileSync(targetSessionFile, lines.join("\n"), "utf-8");
+
+	try {
+		fs.unlinkSync(curFile);
+	} catch {
+		// Best-effort
+	}
+
+	await ctx.switchSession(targetSessionFile, {
+		withSession: async (nextCtx) => {
+			nextCtx.ui.notify(`当前会话已成功迁移至: ${selected.name}`, "info");
+		},
+	});
+
+	return true;
+}
+
 async function runProjectManager(
 	args: string,
 	ctx: ExtensionCommandContext,
@@ -455,6 +541,10 @@ async function runProjectManager(
 	const cleanArg = args.trim();
 	if (cleanArg) {
 		const q = cleanArg.toLowerCase();
+		if (q === "move" || q === "migrate" || q === "迁移") {
+			await handleMigrateCurrentSession(ctx, config);
+			return;
+		}
 		if (
 			q === "scratch" ||
 			q === "scratchpad" ||
@@ -494,19 +584,24 @@ async function runProjectManager(
 
 		// 1. 无项目对话入口
 		menuOptions.push(
-			`💬 [无项目对话] (${displayPath(config.noProjectDir)})${isNoProject ? " ⬅️当前" : ""}`
+			`💬 [无项目对话] (${displayPath(config.noProjectDir)})${isNoProject ? " ⬅️当前" : ""}`,
 		);
 
 		// 2. 已登记项目列表
 		for (const p of config.projects) {
 			const isCurr = normalizeDir(p.path) === currentNorm;
 			menuOptions.push(
-				`📁 ${p.name} (${displayPath(p.path)})${isCurr ? " ⬅️当前" : ""}`
+				`📁 ${p.name} (${displayPath(p.path)})${isCurr ? " ⬅️当前" : ""}`,
 			);
 		}
 
 		// 3. 管理操作
 		menuOptions.push("──────────────────────────────────────");
+
+		const curSessionFile = ctx.sessionManager.getSessionFile();
+		if (curSessionFile && fs.existsSync(curSessionFile)) {
+			menuOptions.push("🚚 将当前会话迁移到其他项目...");
+		}
 
 		const isCurrentInProjects = config.projects.some(
 			(p) => normalizeDir(p.path) === currentNorm,
@@ -557,6 +652,12 @@ async function runProjectManager(
 				);
 				if (switched) break;
 			}
+			continue;
+		}
+
+		if (choice.startsWith("🚚 将当前会话迁移到其他项目")) {
+			const migrated = await handleMigrateCurrentSession(ctx, config);
+			if (migrated) break;
 			continue;
 		}
 
