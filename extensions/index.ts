@@ -448,6 +448,7 @@ async function handleRemoveProject(
 async function handleMigrateCurrentSession(
 	ctx: ExtensionCommandContext,
 	config: ProjectsConfig,
+	targetQuery?: string,
 ): Promise<boolean> {
 	const currentCwd = normalizeDir(ctx.cwd);
 	const curFile = ctx.sessionManager.getSessionFile();
@@ -456,16 +457,16 @@ async function handleMigrateCurrentSession(
 		return false;
 	}
 
-	const targets: { name: string; path: string }[] = [];
+	const targets: { name: string; rawName: string; path: string }[] = [];
 
 	const noProjNorm = normalizeDir(config.noProjectDir);
 	if (currentCwd !== noProjNorm) {
-		targets.push({ name: "💬 无项目对话", path: config.noProjectDir });
+		targets.push({ name: "💬 [无项目对话]", rawName: "scratch", path: config.noProjectDir });
 	}
 
 	for (const p of config.projects) {
 		if (normalizeDir(p.path) !== currentCwd) {
-			targets.push({ name: `📁 ${p.name}`, path: p.path });
+			targets.push({ name: `📁 ${p.name}`, rawName: p.name, path: p.path });
 		}
 	}
 
@@ -474,16 +475,38 @@ async function handleMigrateCurrentSession(
 		return false;
 	}
 
-	const choices = targets.map(
-		(t, idx) => `${idx + 1}. ${t.name} (${displayPath(t.path)})`,
-	);
-	choices.push("↩️ 取消");
+	let selected: { name: string; rawName: string; path: string } | undefined;
 
-	const pick = await ctx.ui.select("选择要将当前会话迁移到的目标项目:", choices);
-	if (!pick || pick.startsWith("↩️")) return false;
+	if (targetQuery && targetQuery.trim()) {
+		const tq = targetQuery.trim().toLowerCase();
+		if (tq === "scratch" || tq === "scratchpad" || tq === "无项目" || tq === "none") {
+			selected = targets.find((t) => normalizeDir(t.path) === noProjNorm);
+		} else {
+			selected = targets.find(
+				(t) =>
+					t.rawName.toLowerCase() === tq ||
+					path.basename(t.path).toLowerCase() === tq ||
+					t.rawName.toLowerCase().includes(tq),
+			);
+		}
+		if (!selected) {
+			ctx.ui.notify(`未找到匹配的项目 "${targetQuery}"，请在下列列表中选择`, "warning");
+		}
+	}
 
-	const idx = Number.parseInt(pick.split(".")[0], 10) - 1;
-	const selected = targets[idx];
+	if (!selected) {
+		const choices = targets.map(
+			(t, idx) => `${idx + 1}. ${t.name} (${displayPath(t.path)})`,
+		);
+		choices.push("↩️ 取消");
+
+		const pick = await ctx.ui.select("选择要将当前会话迁移到的目标项目:", choices);
+		if (!pick || pick.startsWith("↩️")) return false;
+
+		const idx = Number.parseInt(pick.split(".")[0], 10) - 1;
+		selected = targets[idx];
+	}
+
 	if (!selected) return false;
 
 	const ok = await ctx.ui.confirm(
@@ -540,16 +563,35 @@ async function runProjectManager(
 
 	const cleanArg = args.trim();
 	if (cleanArg) {
-		const q = cleanArg.toLowerCase();
-		if (q === "move" || q === "migrate" || q === "迁移") {
-			await handleMigrateCurrentSession(ctx, config);
+		const parts = cleanArg.split(/\s+/);
+		const subCmd = parts[0].toLowerCase();
+
+		if (subCmd === "help" || subCmd === "-h" || subCmd === "--help" || subCmd === "帮助") {
+			ctx.ui.notify(
+				[
+					"【pi-project-manager 命令指南】",
+					"  /p               - 打开交互式项目管理与会话选择菜单",
+					"  /p <项目名>      - 快速切换到指定项目 (支持 Tab 补全)",
+					"  /p scratch       - 快速切换到独立的“无项目”草稿空间",
+					"  /p move [项目名] - 将当前会话连同历史迁移到目标项目并切换过去",
+					"  /p help          - 显示本帮助信息",
+				].join("\n"),
+				"info",
+			);
 			return;
 		}
+
+		if (subCmd === "move" || subCmd === "migrate" || subCmd === "迁移") {
+			const targetQuery = parts.slice(1).join(" ").trim();
+			await handleMigrateCurrentSession(ctx, config, targetQuery);
+			return;
+		}
+
 		if (
-			q === "scratch" ||
-			q === "scratchpad" ||
-			q === "none" ||
-			q === "无项目"
+			subCmd === "scratch" ||
+			subCmd === "scratchpad" ||
+			subCmd === "none" ||
+			subCmd === "无项目"
 		) {
 			const isCurrent =
 				normalizeDir(ctx.cwd) === normalizeDir(config.noProjectDir);
@@ -564,14 +606,16 @@ async function runProjectManager(
 
 		const match = config.projects.find(
 			(p) =>
-				p.name.toLowerCase() === q ||
-				path.basename(p.path).toLowerCase() === q,
+				p.name.toLowerCase() === cleanArg.toLowerCase() ||
+				path.basename(p.path).toLowerCase() === cleanArg.toLowerCase(),
 		);
 		if (match) {
 			const isCurrent = normalizeDir(ctx.cwd) === normalizeDir(match.path);
 			await handleSelectProject(ctx, match.path, match.name, isCurrent);
 			return;
 		}
+
+		ctx.ui.notify(`未找到名称为 "${cleanArg}" 的项目，按 Enter 打开管理菜单`, "warning");
 	}
 
 	// Interactive Menu Loop
@@ -690,42 +734,54 @@ async function runProjectManager(
 	}
 }
 
+function getProjectCompletions(prefix: string) {
+	const cfg = loadConfig();
+	const trimmed = prefix.trimStart();
+
+	// 如果以 move / migrate 开头，补全目标项目
+	if (/^(move|migrate)\s+/i.test(trimmed)) {
+		const match = trimmed.match(/^(move|migrate)\s*(.*)/i);
+		const cmd = match ? match[1] : "move";
+		const subPrefix = match ? match[2].toLowerCase() : "";
+		const targets = [
+			{ value: `${cmd} scratch`, label: `${cmd} scratch (无项目空间)` },
+			...cfg.projects.map((p) => ({
+				value: `${cmd} ${p.name}`,
+				label: `${cmd} ${p.name} (${displayPath(p.path)})`,
+			})),
+		];
+		const filtered = targets.filter((i) =>
+			i.value.toLowerCase().startsWith(trimmed.toLowerCase()),
+		);
+		return filtered.length > 0 ? filtered : null;
+	}
+
+	const baseItems = [
+		{ value: "scratch", label: "scratch (切换至无项目对话)" },
+		{ value: "move", label: "move [项目名] (将当前会话迁移至其他项目)" },
+		{ value: "help", label: "help (查看命令帮助)" },
+		...cfg.projects.map((p) => ({
+			value: p.name,
+			label: `${p.name} (${displayPath(p.path)})`,
+		})),
+	];
+
+	const filtered = baseItems.filter((i) =>
+		i.value.toLowerCase().startsWith(trimmed.toLowerCase()),
+	);
+	return filtered.length > 0 ? filtered : null;
+}
+
 export default function projectManager(pi: ExtensionAPI) {
 	pi.registerCommand("project", {
 		description: "项目管理与切换：快速在项目与无项目对话间切换 (Codex风格)",
-		getArgumentCompletions: (prefix: string) => {
-			const cfg = loadConfig();
-			const items = [
-				{ value: "scratch", label: "scratch (无项目对话)" },
-				...cfg.projects.map((p) => ({
-					value: p.name,
-					label: `${p.name} (${displayPath(p.path)})`,
-				})),
-			];
-			const filtered = items.filter((i) =>
-				i.value.toLowerCase().startsWith(prefix.toLowerCase()),
-			);
-			return filtered.length > 0 ? filtered : null;
-		},
+		getArgumentCompletions: getProjectCompletions,
 		handler: runProjectManager,
 	});
 
 	pi.registerCommand("p", {
 		description: "项目管理快捷命令 (/project 的别名)",
-		getArgumentCompletions: (prefix: string) => {
-			const cfg = loadConfig();
-			const items = [
-				{ value: "scratch", label: "scratch (无项目对话)" },
-				...cfg.projects.map((p) => ({
-					value: p.name,
-					label: `${p.name} (${displayPath(p.path)})`,
-				})),
-			];
-			const filtered = items.filter((i) =>
-				i.value.toLowerCase().startsWith(prefix.toLowerCase()),
-			);
-			return filtered.length > 0 ? filtered : null;
-		},
+		getArgumentCompletions: getProjectCompletions,
 		handler: runProjectManager,
 	});
 }
