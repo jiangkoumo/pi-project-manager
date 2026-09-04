@@ -13,23 +13,30 @@
 - **持久化项目注册表**：通过 `~/.pi/agent/projects.json` 持久化保存项目列表，不再依赖临时缓存。
 - **一键历史项目发现**：自动扫描既往 Pi 会话所涉及的工程目录，支持一键将历史仓库批量勾选登记为项目。
 - **自动清理空会话**：在不同项目间反复切换未发言时，自动回收空会话文件，不制造磁盘垃圾。
+- **会话无损迁移**：支持将当前会话连同完整上下文平滑迁移到指定目标项目（`/p move <目标项目>`），解决“在通用/无项目空间聊了很久才发现应该归档到具体项目”的痛点。
 - **极速命令行直达**：支持 `/p <项目名>` 或 `/p scratch` 直达，支持 Tab 键自动补全。
 
 ---
 
 ## 📦 安装方式
 
-### 方式 1：作为本地 Package 安装到全局（推荐）
+### 方式 1：通过 Pi 包管理器从 npm 安装（推荐）
 在终端中运行：
 ```bash
-pi install /Users/jiangkoumo/Documents/ChatGPT/pi-project-manager
-```
-或直接通过项目相对路径安装：
-```bash
-pi install ./pi-project-manager
+pi install npm:pi-project-manager
 ```
 
-### 方式 2：作为全局纯脚本生效
+### 方式 2：通过 Git 仓库直接安装
+```bash
+pi install git:github.com/jiangkoumo/pi-project-manager
+```
+
+### 方式 3：作为本地 Package 安装
+```bash
+pi install /path/to/pi-project-manager
+```
+
+### 方式 4：作为全局纯脚本生效
 直接将 `extensions/index.ts` 复制到全局扩展目录：
 ```bash
 cp extensions/index.ts ~/.pi/agent/extensions/project-manager.ts
@@ -52,13 +59,14 @@ cp extensions/index.ts ~/.pi/agent/extensions/project-manager.ts
 终端将弹出交互选择菜单：
 ```text
 ? [项目管理] 当前位置: ~/Documents/ChatGPT/pi-project-manager
-  💬 [无项目对话] (~/.pi/scratchpad)
+  📝 [无项目对话] (~/.pi/scratchpad)
   📁 pi-tool-discipline (~/Documents/ChatGPT/pi-tool-discipline)
   📁 pi-project-manager (~/Documents/ChatGPT/pi-project-manager) ⬅️当前
 ──────────────────────────────────────
   ➕ 将当前目录添加为项目 (pi-project-manager)
-  📂 手动输入目录添加为项目...
+  📥 手动输入目录添加为项目...
   🔍 从历史会话中发现并导入项目...
+  🚚 将当前会话移动并切换到其他项目...
   ⚙️ 设置默认“无项目”工作目录...
   🗑️ 移除已登记的项目...
   ❌ 退出菜单
@@ -67,12 +75,13 @@ cp extensions/index.ts ~/.pi/agent/extensions/project-manager.ts
 ### 2. 会话选择（二级菜单）
 选中任意已登记项目或无项目模式后：
 - `▶️ 继续上次对话 (10分钟前: "帮我实现...")`：继续上一个会话。
-- `🆕 在该项目中开启全新对话`：在当前工程开新会话。
-- `📜 选择历史会话 (共 N 个)...`：浏览挑选过去的特定对话进入。
+- `✨ 在该项目中开启全新对话`：在当前工程开新会话。
+- `📚 选择历史会话 (共 N 个)...`：浏览挑选过去的特定对话进入。
 
-### 3. 快速跳跃与参数补全
+### 3. 快速跳跃与会话迁移
 - `/p scratch`：直接秒切到“无项目”空间。
 - `/p <项目名>`：直接切到指定项目（支持输入 `/p ` 后按 Tab 键自动补全项目名）。
+- `/p move <目标项目>`：将当前会话及其完整历史迁移到目标项目目录并切换过去。
 
 ---
 
@@ -99,6 +108,18 @@ cp extensions/index.ts ~/.pi/agent/extensions/project-manager.ts
   ]
 }
 ```
+
+---
+
+## 🌐 English Overview
+
+`pi-project-manager` is a project & session manager extension for [Pi](https://github.com/earendil-works/pi-mono), inspired by OpenAI Codex CLI.
+
+- **In-terminal project switching**: Switch workspace (`cwd`) and session context instantly without exiting `pi`.
+- **Project-scoped sessions**: Conversations are automatically isolated and stored under each project's directory.
+- **Scratchpad mode**: A dedicated non-project workspace (e.g. `~/.pi/scratchpad`) for quick chats, scratchpads, and temporary experiments without dirtying Git repos.
+- **Session migration**: Move current session and history to a target project seamlessly with `/p move <target>`.
+- **Auto discovery**: Discover and register recent project folders from previous Pi sessions with one click.
 
 ---
 
