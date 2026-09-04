@@ -1,0 +1,45 @@
+{
+  "name": "pi-project-manager",
+  "version": "0.1.0",
+  "description": "Pi extension: Codex-style project manager with in-terminal switching, session isolation, and scratchpad mode",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jiangkoumo/pi-project-manager.git"
+  },
+  "keywords": [
+    "pi",
+    "pi-package",
+    "pi-extension",
+    "project",
+    "workspace",
+    "session",
+    "scratchpad",
+    "codex"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  },
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.84"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.0.0"
+  }
+}
