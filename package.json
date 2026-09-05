@@ -1,7 +1,7 @@
 {
   "name": "pi-project-manager",
-  "version": "0.1.1",
-  "description": "Pi extension: Codex-style project manager with in-terminal switching, session isolation, and scratchpad mode",
+  "version": "0.2.0",
+  "description": "Pi extension: Raycast/Telescope-style modern two-pane project manager with instant search, live Git/session preview, and scratchpad mode",
   "type": "module",
   "author": "jiangkoumo",
   "license": "MIT",
@@ -32,19 +32,23 @@
   "files": [
     "extensions",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "assets"
   ],
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "npx tsx test/render-test.ts && npx tsx test/width-test.ts"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.84"
+    "@earendil-works/pi-coding-agent": ">=0.84",
+    "@earendil-works/pi-tui": ">=0.84"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
     "@types/node": "^22.0.0",
     "typescript": "^5.0.0"
   }

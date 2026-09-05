@@ -7,6 +7,9 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { getGitInfo } from "./git.js";
+import { ProjectOverlayComponent } from "./ui/project-overlay.js";
+import type { ActionItem, ListItem, ProjectMeta, ProjectOverlayResult } from "./ui/types.js";
 
 interface ProjectItem {
 	name: string;
@@ -169,6 +172,11 @@ async function pickAndSwitchSession(
 	sessions: SessionInfo[],
 	projectName: string,
 ): Promise<boolean> {
+	if (sessions.length === 0) {
+		await switchToDir(ctx, targetDir, undefined, projectName);
+		return true;
+	}
+
 	const choices = sessions.map((s, idx) => {
 		const namePart = s.name ? `[${s.name}] ` : "";
 		return `${idx + 1}. ${namePart}${relativeTime(s.modified)} (${s.messageCount}条消息): "${snippet(s.firstMessage)}"`;
@@ -204,7 +212,7 @@ async function handleSelectProject(
 		const choices = [
 			"🆕 在当前项目开启全新对话",
 			...(sessions.length > 1
-				? [`📜 切换到当前项目的其他历史会话 (${sessions.length}个)...`]
+				? [`📋 切换到当前项目的其他历史会话 (${sessions.length}个)...`]
 				: []),
 			"↩️ 返回上级菜单",
 		];
@@ -217,7 +225,7 @@ async function handleSelectProject(
 			await switchToDir(ctx, targetDir, undefined, projectName);
 			return true;
 		}
-		if (pick.startsWith("📜")) {
+		if (pick.startsWith("📋")) {
 			return await pickAndSwitchSession(ctx, targetDir, sessions, projectName);
 		}
 		return false;
@@ -233,7 +241,7 @@ async function handleSelectProject(
 		`▶️ 继续上次对话 (${relativeTime(latest.modified)}: "${snippet(latest.firstMessage)}")`,
 		"🆕 在该项目中开启全新对话",
 		...(sessions.length > 1
-			? [`📜 选择历史会话 (共 ${sessions.length} 个)...`]
+			? [`📋 选择历史会话 (共 ${sessions.length} 个)...`]
 			: []),
 		"↩️ 返回上级菜单",
 	];
@@ -249,7 +257,7 @@ async function handleSelectProject(
 		await switchToDir(ctx, targetDir, undefined, projectName);
 		return true;
 	}
-	if (pick.startsWith("📜")) {
+	if (pick.startsWith("📋")) {
 		return await pickAndSwitchSession(ctx, targetDir, sessions, projectName);
 	}
 	return false;
@@ -445,6 +453,29 @@ async function handleRemoveProject(
 	return false;
 }
 
+async function handleRemoveSingleProject(
+	ctx: ExtensionCommandContext,
+	config: ProjectsConfig,
+	project: ProjectMeta,
+): Promise<boolean> {
+	const ok = await ctx.ui.confirm(
+		"确认移除项目",
+		`确定要从项目列表中移除 "${project.name}" 吗？(仅移除登记，不删除本地文件)`,
+	);
+	if (!ok) return false;
+
+	const idx = config.projects.findIndex(
+		(p) => normalizeDir(p.path) === normalizeDir(project.path),
+	);
+	if (idx >= 0) {
+		config.projects.splice(idx, 1);
+		saveConfig(config);
+		ctx.ui.notify(`已移除项目: ${project.name}`, "info");
+		return true;
+	}
+	return false;
+}
+
 async function handleMigrateCurrentSession(
 	ctx: ExtensionCommandContext,
 	config: ProjectsConfig,
@@ -461,7 +492,7 @@ async function handleMigrateCurrentSession(
 
 	const noProjNorm = normalizeDir(config.noProjectDir);
 	if (currentCwd !== noProjNorm) {
-		targets.push({ name: "💬 [无项目对话]", rawName: "scratch", path: config.noProjectDir });
+		targets.push({ name: "⚡ [无项目对话]", rawName: "scratch", path: config.noProjectDir });
 	}
 
 	for (const p of config.projects) {
@@ -554,6 +585,108 @@ async function handleMigrateCurrentSession(
 	return true;
 }
 
+async function prepareProjectItems(
+	ctx: ExtensionCommandContext,
+	config: ProjectsConfig,
+): Promise<ListItem[]> {
+	const currentNorm = normalizeDir(ctx.cwd);
+	const noProjNorm = normalizeDir(config.noProjectDir);
+
+	// 1. Scratchpad item
+	const scratchSessions = await SessionManager.list(noProjNorm).catch(() => []);
+	const scratchGit = getGitInfo(noProjNorm);
+	const scratchMeta: ProjectMeta = {
+		name: "无项目空间",
+		path: config.noProjectDir,
+		isCurrent: currentNorm === noProjNorm,
+		isScratchpad: true,
+		git: scratchGit,
+		sessions: scratchSessions,
+		sessionCount: scratchSessions.length,
+		lastActive: scratchSessions[0]?.modified || null,
+	};
+
+	const items: ListItem[] = [
+		{ kind: "project", project: scratchMeta },
+	];
+
+	// 2. Registered projects
+	for (const p of config.projects) {
+		const pNorm = normalizeDir(p.path);
+		const pSessions = await SessionManager.list(pNorm).catch(() => []);
+		const pGit = getGitInfo(pNorm);
+		const pMeta: ProjectMeta = {
+			name: p.name,
+			path: p.path,
+			isCurrent: currentNorm === pNorm,
+			isScratchpad: false,
+			git: pGit,
+			sessions: pSessions,
+			sessionCount: pSessions.length,
+			lastActive: pSessions[0]?.modified || null,
+		};
+		items.push({ kind: "project", project: pMeta });
+	}
+
+	// 3. Action items
+	const isCurrentInProjects = config.projects.some(
+		(p) => normalizeDir(p.path) === currentNorm,
+	);
+	const isNoProject = currentNorm === noProjNorm;
+
+	if (!isNoProject && !isCurrentInProjects) {
+		items.push({
+			kind: "action",
+			action: {
+				id: "add-current",
+				title: "+ 登记当前工作区",
+				desc: `将当前终端所在的工作区目录 (${displayPath(ctx.cwd)}) 添加到项目管理器。`,
+			},
+		});
+	}
+
+	const curSessionFile = ctx.sessionManager.getSessionFile();
+	if (curSessionFile && fs.existsSync(curSessionFile)) {
+		items.push({
+			kind: "action",
+			action: {
+				id: "migrate",
+				title: "→ 迁移当前会话...",
+				desc: "将当前对话历史完整迁移到目标项目的工作区目录下，并切换到目标项目。",
+			},
+		});
+	}
+
+	items.push({
+		kind: "action",
+		action: {
+			id: "add-custom",
+			title: "+ 手动添加路径...",
+			desc: "输入本地文件夹路径（支持 ~ 缩写），将其登记为项目。",
+		},
+	});
+
+	items.push({
+		kind: "action",
+		action: {
+			id: "discover",
+			title: "* 扫描历史项目...",
+			desc: "自动扫描所有历史会话中访问过的未登记工程目录，一键批量登记。",
+		},
+	});
+
+	items.push({
+		kind: "action",
+		action: {
+			id: "set-scratch",
+			title: "~ 设置草稿目录...",
+			desc: `修改独立草稿箱对应的本地文件夹路径（当前: ${displayPath(config.noProjectDir)}）。`,
+		},
+	});
+
+	return items;
+}
+
 async function runProjectManager(
 	args: string,
 	ctx: ExtensionCommandContext,
@@ -570,8 +703,8 @@ async function runProjectManager(
 			ctx.ui.notify(
 				[
 					"【pi-project-manager 命令指南】",
-					"  /p               - 打开交互式项目管理与会话选择菜单",
-					"  /p <项目名>      - 快速切换到指定项目 (支持 Tab 补全)",
+					"  /p               - 打开现代两栏式项目管理面板 (支持打字即时过滤)",
+					"  /p <项目名>      - 快速切换到指定项目 (支持 Tab 补全，0 延迟直达)",
 					"  /p scratch       - 快速切换到独立的“无项目”草稿空间",
 					"  /p move [项目名] - 将当前会话连同历史迁移到目标项目并切换过去",
 					"  /p help          - 显示本帮助信息",
@@ -618,20 +751,119 @@ async function runProjectManager(
 		ctx.ui.notify(`未找到名称为 "${cleanArg}" 的项目，按 Enter 打开管理菜单`, "warning");
 	}
 
-	// Interactive Menu Loop
+	// Interactive Loop
 	while (true) {
+		// If TUI mode is active, present modern two-pane overlay
+		if (ctx.mode === "tui") {
+			const items = await prepareProjectItems(ctx, config);
+
+			const result = await ctx.ui.custom<ProjectOverlayResult>(
+				(tui, theme, _keybindings, done) =>
+					new ProjectOverlayComponent(
+						theme,
+						items,
+						done,
+						() => tui.requestRender(),
+					),
+				{
+					overlay: true,
+					overlayOptions: {
+						anchor: "center",
+						offsetY: 2,
+					},
+				},
+			);
+
+			if (!result) {
+				// User cancelled / pressed Esc
+				break;
+			}
+
+			if (result.action === "switch-latest") {
+				const p = result.project;
+				const latest = p.sessions[0];
+				await switchToDir(
+					ctx,
+					p.path,
+					latest ? latest.path : undefined,
+					p.name,
+				);
+				break;
+			}
+
+			if (result.action === "switch-new") {
+				const p = result.project;
+				await switchToDir(ctx, p.path, undefined, p.name);
+				break;
+			}
+
+			if (result.action === "pick-session") {
+				const p = result.project;
+				const switched = await pickAndSwitchSession(
+					ctx,
+					p.path,
+					p.sessions,
+					p.name,
+				);
+				if (switched) break;
+				continue;
+			}
+
+			if (result.action === "migrate") {
+				const p = result.project;
+				const migrated = await handleMigrateCurrentSession(
+					ctx,
+					config,
+					p.isScratchpad ? "scratch" : p.name,
+				);
+				if (migrated) break;
+				continue;
+			}
+
+			if (result.action === "remove") {
+				await handleRemoveSingleProject(ctx, config, result.project);
+				continue;
+			}
+
+			if (result.action === "execute-action") {
+				const actionId = result.actionId;
+				if (actionId === "add-current") {
+					await handleAddCurrent(ctx, config);
+					continue;
+				}
+				if (actionId === "add-custom") {
+					const switched = await handleAddCustom(ctx, config);
+					if (switched) break;
+					continue;
+				}
+				if (actionId === "discover") {
+					const switched = await handleDiscoverHistory(ctx, config);
+					if (switched) break;
+					continue;
+				}
+				if (actionId === "set-scratch") {
+					await handleSetNoProjectDir(ctx, config);
+					continue;
+				}
+				if (actionId === "migrate") {
+					const migrated = await handleMigrateCurrentSession(ctx, config);
+					if (migrated) break;
+					continue;
+				}
+			}
+			continue;
+		}
+
+		// Fallback for non-TUI environments
 		const currentNorm = normalizeDir(ctx.cwd);
 		const noProjNorm = normalizeDir(config.noProjectDir);
 		const isNoProject = currentNorm === noProjNorm;
 
 		const menuOptions: string[] = [];
-
-		// 1. 无项目对话入口
 		menuOptions.push(
-			`💬 [无项目对话] (${displayPath(config.noProjectDir)})${isNoProject ? " ⬅️当前" : ""}`,
+			`⚡ [无项目对话] (${displayPath(config.noProjectDir)})${isNoProject ? " ⬅️当前" : ""}`,
 		);
 
-		// 2. 已登记项目列表
 		for (const p of config.projects) {
 			const isCurr = normalizeDir(p.path) === currentNorm;
 			menuOptions.push(
@@ -639,12 +871,11 @@ async function runProjectManager(
 			);
 		}
 
-		// 3. 管理操作
 		menuOptions.push("──────────────────────────────────────");
 
 		const curSessionFile = ctx.sessionManager.getSessionFile();
 		if (curSessionFile && fs.existsSync(curSessionFile)) {
-			menuOptions.push("🚚 将当前会话迁移到其他项目...");
+			menuOptions.push("📦 将当前会话迁移到其他项目...");
 		}
 
 		const isCurrentInProjects = config.projects.some(
@@ -654,8 +885,8 @@ async function runProjectManager(
 			menuOptions.push(`➕ 将当前目录添加为项目 (${path.basename(ctx.cwd)})`);
 		}
 
-		menuOptions.push("📂 手动输入目录添加为项目...");
-		menuOptions.push("🔍 从历史会话中发现并导入项目...");
+		menuOptions.push("📁 手动输入目录添加为项目...");
+		menuOptions.push("✨ 从历史会话中发现并导入项目...");
 		menuOptions.push("⚙️ 设置默认“无项目”工作目录...");
 		if (config.projects.length > 0) {
 			menuOptions.push("🗑️ 移除已登记的项目...");
@@ -671,7 +902,7 @@ async function runProjectManager(
 			break;
 		}
 
-		if (choice.startsWith("💬 [无项目对话]")) {
+		if (choice.startsWith("⚡ [无项目对话]")) {
 			const switched = await handleSelectProject(
 				ctx,
 				config.noProjectDir,
@@ -699,7 +930,7 @@ async function runProjectManager(
 			continue;
 		}
 
-		if (choice.startsWith("🚚 将当前会话迁移到其他项目")) {
+		if (choice.startsWith("📦 将当前会话迁移到其他项目")) {
 			const migrated = await handleMigrateCurrentSession(ctx, config);
 			if (migrated) break;
 			continue;
@@ -710,13 +941,13 @@ async function runProjectManager(
 			continue;
 		}
 
-		if (choice.startsWith("📂 手动输入目录添加为项目")) {
+		if (choice.startsWith("📁 手动输入目录添加为项目")) {
 			const switched = await handleAddCustom(ctx, config);
 			if (switched) break;
 			continue;
 		}
 
-		if (choice.startsWith("🔍 从历史会话中发现并导入项目")) {
+		if (choice.startsWith("✨ 从历史会话中发现并导入项目")) {
 			const switched = await handleDiscoverHistory(ctx, config);
 			if (switched) break;
 			continue;
@@ -738,11 +969,9 @@ function getProjectCompletions(prefix: string) {
 	const cfg = loadConfig();
 	const trimmed = prefix.trimStart();
 
-	// 如果以 move / migrate 开头，补全目标项目
 	if (/^(move|migrate)\s+/i.test(trimmed)) {
 		const match = trimmed.match(/^(move|migrate)\s*(.*)/i);
 		const cmd = match ? match[1] : "move";
-		const subPrefix = match ? match[2].toLowerCase() : "";
 		const targets = [
 			{ value: `${cmd} scratch`, label: `${cmd} scratch (无项目空间)` },
 			...cfg.projects.map((p) => ({
@@ -774,7 +1003,7 @@ function getProjectCompletions(prefix: string) {
 
 export default function projectManager(pi: ExtensionAPI) {
 	pi.registerCommand("project", {
-		description: "项目管理与切换：快速在项目与无项目对话间切换 (Codex风格)",
+		description: "项目管理与切换：现代化两栏终端面板，即搜即切 (Codex/Raycast风格)",
 		getArgumentCompletions: getProjectCompletions,
 		handler: runProjectManager,
 	});
